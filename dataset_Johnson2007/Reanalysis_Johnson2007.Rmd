@@ -1,0 +1,225 @@
+---
+title: "Reanalysis Johnson2007 - figures and code"
+author: "Peter Hettegger"
+date: "27 9 2020"
+output:
+  BiocStyle::pdf_document:
+    toc: FALSE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "left")
+```
+
+The `sessionInfo()` is provided at the end of the document.
+
+
+```{r}
+rm(list = ls())
+
+library(GGally)
+library(ggplot2)
+library(limma)
+library(sva)
+library(qvalue)
+library(randRotation)
+
+```
+
+
+File from https://github.com/ous-uio-bioinfo-core/batch-adjust-warning-figures/tree/master/reanalysis/Johnson2007/data
+See also Nygaard, V., Rodland, E. A. & Hovig, E. Methods that remove batch effects while retaining group differences may lead to exaggerated confidence in downstream analyses. Biostatistics kxv027 (2015). doi:10.1093/biostatistics/kxv027
+
+
+```{r}
+edata <- read.table(file = "dataExample2.txt", header = TRUE,
+                    sep = "\t", dec = ".", stringsAsFactors = FALSE)
+```
+
+
+File from https://github.com/ous-uio-bioinfo-core/batch-adjust-warning-figures/tree/master/reanalysis/Johnson2007/data
+See also Nygaard, V., Rodland, E. A. & Hovig, E. Methods that remove batch effects while retaining group differences may lead to exaggerated confidence in downstream analyses. Biostatistics kxv027 (2015). doi:10.1093/biostatistics/kxv027
+
+```{r}
+pdata <- read.table(file = "sampleInfoExample2.txt", header = TRUE,
+                    sep = "\t", dec = ".", stringsAsFactors = TRUE,
+                    row.names = 1)
+
+samps <- which(pdata$Type != "WT")
+
+pdata <- pdata[samps,]
+edata <- edata[,samps]
+pdata$Type <- droplevels(pdata$Type)
+pdata$Batch <- as.factor(pdata$Batch)
+
+all.equal(rownames(pdata), colnames(edata))
+
+
+
+# flooring to 1
+edata[edata<1] <- 1
+# take out data with too many low/missing values.
+negativeprobesfilter <- rowSums(edata>1) >= (0.9*ncol(edata))
+edata <- edata[negativeprobesfilter,]
+# quantilenormalize
+edata.quan <- normalizeBetweenArrays(log2(edata), method="quantile")
+```
+
+
+```{r}
+# for debugging
+debug = FALSE
+if(debug) edata <- edata[1:1000,]
+```
+
+
+```{r}
+#### ComBat - "p ComBat" values
+
+mod.com <- model.matrix(~Type, pdata)
+edata.com <- ComBat(edata.quan,
+                    batch = pdata$Batch,
+                    mod = mod.com)
+
+
+mod.fit <- model.matrix(~Type, pdata)
+fit1 <- lmFit(edata.com, design = mod.fit)
+fit1 <- eBayes(fit1)
+
+ps.com  <- topTable(fit1, number = Inf, sort.by = "none")$P.Value
+fdr.com <- topTable(fit1, number = Inf, sort.by = "none")$adj.P.Val
+
+sum(fdr.com<0.05)
+sum(qvalue(ps.com)$qvalues < 0.05)
+```
+
+
+```{r}
+#### limma batch as covariate - "p Limma (+batch)" values
+
+mod.fit <- model.matrix(~Type + Batch, pdata)
+fit2 <- lmFit(edata.quan, design = mod.fit)
+fit2 <- eBayes(fit2)
+
+ps.lim  <- topTable(fit2, coef = 2, number = Inf, sort.by = "none")$P.Value
+fdr.lim <- topTable(fit2, coef = 2, number = Inf, sort.by = "none")$adj.P.Val
+
+sum(fdr.lim<0.05)
+sum(qvalue(ps.lim)$qvalues < 0.05)
+```
+
+
+```{r}
+#### ComBat with random rotations - "p ComBat - 2000 rot." values
+
+mod.fit <- model.matrix(~Type, pdata)
+
+rr1 <- initBatchRandrot(edata.quan, mod.fit, 2, pdata$Batch)
+
+statistic <- function(Y, batch, mod){
+    edata.com <- sva::ComBat(Y,
+                            batch = batch,
+                            mod = mod, mean.only = FALSE)
+    
+    fit1 <- limma::lmFit(edata.com, design = mod)
+    fit1 <- limma::eBayes(fit1)
+
+    abs(limma::topTable(fit1, number = Inf, sort.by = "none")$t)
+}
+```
+
+
+```{r message=FALSE, results='hide', warning=FALSE}
+rs1 <- rotateStat(rr1, R = 2000, statistic = statistic, pdata$Batch,
+                  mod.fit, parallel = TRUE)
+```
+
+
+```{r}
+ps.rot <- pFdr(rs1)
+fdr.rot <- p.adjust(ps.rot, "BH")
+
+sum(fdr.rot<0.05)
+sum(qvalue(ps.rot)$qvalues < 0.05)
+
+ps <- cbind(ps.com, ps.lim, ps.rot = ps.rot[,1])
+colnames(ps) <- c("p ComBat", "p Limma (+batch)", "p ComBat - 2000 rot.")
+
+apply(ps, 2, function(i)sum(qvalue::qvalue(i)$qvalues < 0.05))
+apply(ps, 2, function(i)sum(p.adjust(i, "BH") < 0.05))
+```
+
+
+```{r fig.width = 6, fig.height = 6}
+#### p-vals scatterplot
+
+df1 <- data.frame(ps)
+colnames(df1) <- colnames(ps)
+
+F1 <- function(...){
+    ggally_points(..., size = 0.7)+
+        scale_y_log10()+
+        scale_x_log10()+
+        geom_abline(slope = 1, intercept = 0, lty = 2, lwd = 0.5, col = "red")
+}
+lower.pan <- list(continuous = F1, combo = "facethist", discrete = "facetbar",
+                  na = "na")
+
+my.cor <- function(...)
+    ggally_statistic(
+      text_fn = 
+        function(x,y)formatC(cor(log(x),log(y)), digits = 3, format = "f"),
+      title = "Corr",
+      sep = ":\n",...)
+
+upper.pan <- list(continuous = my.cor, combo = "box_no_facet",
+                  discrete = "count", na = "na")
+
+ggpairs(df1, lower = lower.pan, upper = upper.pan, diag = NULL)
+```
+
+
+```{r fig.width = 3, fig.height = 6}
+#### Histograms
+
+df2 <- reshape2::melt(ps)
+
+ggplot(df2, aes(x=value))+
+    geom_histogram(colour="black", fill="lightgreen", binwidth =0.1,boundary=0)+
+    facet_grid(Var2 ~ ., switch = "y")+
+    geom_abline(slope = 0, intercept = nrow(ps)/10, lty = 2, col = "blue")+
+    theme(axis.title.y = element_text(vjust=+3.3))
+```
+
+
+```{r fig.width = 4, fig.height = 3}
+## Histograms 2
+
+ind <- 1:15
+h.com <- hist(ps.com, breaks = 100, plot = FALSE)
+h.lim <- hist(ps.lim, breaks = 100, plot = FALSE)
+h.rot <- hist(ps.rot, breaks = 100, plot = FALSE)
+
+maxcount <- max(h.com$counts, h.lim$counts, h.rot$counts)
+
+lab <- factor(rep(colnames(ps), rep(length(ind),3)), levels = colnames(ps))
+
+df1 <- data.frame(
+  mids = c(h.com$mids[ind], h.lim$mids[ind], h.rot$mids[ind]),
+  counts = c(h.com$counts[ind], h.lim$counts[ind], h.rot$counts[ind]),
+  lab = lab)
+
+ggplot(df1, aes(x = mids, y = counts, colour = lab, lty = lab))+
+    geom_line(lwd = 0.6) +
+    xlab("p-value")+ ylab("Frequency")+
+    theme(axis.title.y = element_text(vjust=+3.3)) +
+    theme(legend.justification=c(1,1), legend.position=c(0.98, 0.98), 
+          legend.title = element_blank())+
+    theme(legend.key.size = unit(1.5,"line"))
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,176 @@
+---
+title: "random data - figures and code"
+author: "Peter Hettegger"
+date: "27 9 2020"
+output:
+  BiocStyle::pdf_document:
+    toc: FALSE
+    fig_width: 4.3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+For reproducibility, the `sessionInfo()` is provided at the end of the document.
+
+
+```{r}
+rm(list = ls())
+
+set.seed(0)
+
+library(randRotation)
+library(GGally)
+library(ggplot2)
+
+pdata <- data.frame(batch = as.factor(rep(c(1:3), c(10,10,10))),
+                    group = as.factor(rep(c("Control", "Case"), c(5,5))))
+
+features <- 2000
+
+# Matrix with random gene expression data
+edata <- matrix(rnorm(features * nrow(pdata)), features)
+rownames(edata) <- paste("feature", 1:nrow(edata))
+```
+
+
+```{r}
+mod1 <- model.matrix(~group, pdata)
+
+##### Raw data (no batch effect) - "p0" values
+
+fit0 <- limma::lmFit(edata, mod1)
+fit0 <- limma::eBayes(fit0)
+tt0 <- limma::topTable(fit0, 2, Inf, sort.by = "none", adjust.method = "none")
+p.0 <- tt0$P.Value
+```
+
+
+```{r}
+#################### add batch effect ######################
+
+## additive and multiplicative batch effect
+edata <- t( t(edata)*rep(c(0.8,1,1.2), c(10,10,10)) + rep(c(-2,0,2), c(10,10,10)) )
+
+#############################################################
+```
+
+
+```{r}
+##### ComBat - "p ComBat" values
+edata.combat <- sva::ComBat(edata, pdata$batch, mod1)
+fit1 <- limma::lmFit(edata.combat, mod1)
+fit1 <- limma::eBayes(fit1)
+tt1 <- limma::topTable(fit1, 2, Inf, sort.by = "none", adjust.method = "none")
+p.com <- tt1$P.Value
+
+
+##### Limma (batch as covariate) - "p Limma (+batch)" values
+
+mod2 <- model.matrix(~group+batch, pdata)
+fit2 <- limma::lmFit(edata, mod2)
+fit2 <- limma::eBayes(fit2)
+tt2 <- limma::topTable(fit2, 2, Inf, sort.by = "none", adjust.method = "none")
+p.lim <- tt2$P.Value
+
+
+###### ComBat with random rotation - "p ComBat - 100 rot." values
+
+rr1 <- initBatchRandrot(edata, mod1, 2, pdata$batch)
+
+statistic <- function(Y, mod, batch){
+    Y <- sva::ComBat(Y, batch, mod)
+    fit1 <- limma::lmFit(Y, mod)
+    fit1 <- limma::eBayes(fit1)
+    abs(fit1$t[,2])
+}
+```
+
+
+```{r message=FALSE, results='hide', warning=FALSE}
+rs1 <- rotateStat(rr1, 100, statistic, mod1, pdata$batch)
+```
+
+
+```{r}
+p.rot <- pFdr(rs1, pooled = TRUE)[,1]
+
+ps <- cbind(p.0, p.com, p.lim, p.rot)
+colnames(ps) <- c("p0", "p ComBat", "p Limma (+batch)", "p ComBat - 100 rot.")
+```
+
+
+```{r}
+#### p-vals scatterplot
+
+df1 <- data.frame(ps)
+colnames(df1) <- colnames(ps)
+
+F1 <- function(...){
+    ggally_points(..., size = 0.7)+
+        scale_y_log10()+
+        scale_x_log10()+
+        geom_abline(slope = 1, intercept = 0, lty = 2, lwd = 0.5, col = "red")
+}
+lower.pan <- list(continuous = F1, combo = "facethist", discrete = "facetbar",
+                  na = "na")
+
+my.cor <- function(...)
+    ggally_statistic(text_fn = function(x,y)formatC(cor(log(x),log(y)), digits = 3, format = "f"), title = "Corr", sep = ":\n",...)
+upper.pan <- list(continuous = my.cor, combo = "box_no_facet",
+                          discrete = "count", na = "na")
+
+ggpairs(df1, lower = lower.pan, upper = upper.pan,
+        diag = NULL, columnLabels = colnames(ps))
+```
+
+
+```{r}
+#### Histograms
+
+
+df2 <- reshape2::melt(ps)
+
+ggplot(df2, aes(x=value))+
+    geom_histogram(colour="black", fill="lightgreen", binwidth = 0.1, boundary = 0)+
+    facet_grid(Var2 ~ ., switch = "y")+
+    geom_abline(slope = 0, intercept = 200, lty = 2, col = "blue")+
+    theme(axis.title.y = element_text(vjust=+3.3))
+
+
+
+df2 <- reshape2::melt(ps[,-3])
+
+ggplot(df2, aes(x=value))+
+    geom_histogram(colour="black", fill="lightgreen", binwidth = 0.1, boundary = 0)+
+    facet_grid(Var2 ~ ., switch = "y")+
+    geom_abline(slope = 0, intercept = 200, lty = 2, col = "blue")+
+    theme(axis.title.y = element_text(vjust=+3.3))
+```
+
+
+```{r}
+##### Scatterplots
+
+
+ggplot(data = df1, aes(x = `p0`, y = `p ComBat`)) +
+    geom_point() +
+    scale_y_log10()+
+    scale_x_log10()+
+    theme(axis.title.y = element_text(vjust=+3.3))+
+    geom_abline(slope = 1, intercept = 0, lty = 2, lwd = 0.5, col = "red")
+
+ggplot(df1, aes(x = `p0`, y = `p ComBat - 100 rot.`)) +
+    geom_point() +
+    scale_y_log10()+
+    scale_x_log10()+
+    theme(axis.title.y = element_text(vjust=+3.3))+
+    geom_abline(slope = 1, intercept = 0, lty = 2, lwd = 0.5, col = "red")
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
